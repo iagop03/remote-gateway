@@ -1,0 +1,37 @@
+services:
+  remote-gateway:
+    build: .
+    ports:
+      - "9000:9000"
+    environment:
+      REMOTE_GATEWAY_HOST: 0.0.0.0
+      # Required: the gateway refuses to start on a non-local host (0.0.0.0,
+      # needed to publish the port above) without a token — set it in a
+      # sibling .env file (REMOTE_GATEWAY_TOKEN=...) or your shell env.
+      REMOTE_GATEWAY_TOKEN: ${REMOTE_GATEWAY_TOKEN:?set REMOTE_GATEWAY_TOKEN before starting}
+      CLAUDE_CODE_ENABLED: "true"
+      GEMINI_ENABLED: "false"
+      CODEX_ENABLED: "false"
+      OLLAMA_ENABLED: "true"
+      # host.docker.internal reaches services running on the host machine
+      # (e.g. Ollama, LM Studio) from inside the container.
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      LOG_FORMAT: json
+    volumes:
+      - remote-gateway-data:/data
+      # CLI auth state — mount so login persists across container rebuilds.
+      # Comment out any driver you're not using.
+      - ${HOME}/.claude:/root/.claude
+      - ${HOME}/.claude.json:/root/.claude.json
+      - ${HOME}/.gemini:/root/.gemini
+      - ${HOME}/.codex:/root/.codex
+      # Project directories sessions may use as working_directory — mount
+      # whatever you need and set ALLOWED_WORKING_DIRECTORIES=/workspace/... to
+      # match (unset = unrestricted, but the driver still can't see paths that
+      # aren't mounted here regardless).
+      - ./projects:/workspace
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  remote-gateway-data:

@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+tests/
+scripts/
+.env
+*.db
+remote_gateway.egg-info/
+.git/
+README.md
+CHANGELOG.md
