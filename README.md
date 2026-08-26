@@ -50,6 +50,14 @@ Models are addressed with a provider prefix, for example `ollama:mistral`,
 OpenAI-compatible target, so it's just another `HTTPDriver` config entry, no
 new code.
 
+**Verification status**: `ollama` is verified live (real streaming, real
+turns, normalization tests). `lmstudio`, `vllm`, and `localai` run the exact
+same `HTTPDriver` code path and OpenAI-compatible request/response shape —
+same code, not a separate implementation — but none of the three has been
+exercised against a real running instance. If you hit something that doesn't
+work with one of them, that's why; open an issue with the actual response
+shape your server sent.
+
 ### CLI agent drivers (Claude Code, Gemini CLI, Codex CLI)
 
 All three subclass `SubprocessAgentDriver` ([drivers/subprocess_agent.py](remote_gateway/drivers/subprocess_agent.py)),
@@ -167,6 +175,32 @@ rows to query.
 "Active"/"non-terminal" means anything other than `completed`, `error`, or
 `expired` — `interrupted` still counts, since an interrupted session is still
 resumable.
+
+### Rate limiting
+
+`RATE_LIMIT_PER_MINUTE` (default 30, `0` disables it) — a sliding-window
+limit per `X-Client-Id` on the model-invoking endpoints (`POST /v1/messages`,
+`/sessions`, `/sessions/{id}/messages`). Every attempt counts, including one
+the endpoint later rejects for its own reasons (`409` same-driver conflict,
+`429` concurrency limit, ...) — this is about catching a runaway client, not
+just successful calls. Deliberately far below KeyBridge's `PROXY_TOKEN_RPM`
+default of 600: a local agent turn takes seconds to minutes, not the
+milliseconds a thin proxy call to a cloud API does.
+
+### Graceful shutdown
+
+On shutdown, every in-flight session's subprocess is interrupted the same
+graceful way `POST /sessions/{id}/interrupt` does (`SIGINT`/`CTRL_BREAK`,
+never a kill) and given a grace period to exit before being force-killed as a
+last resort. Before this fix, `lifespan` on shutdown only cancelled the
+session reaper and closed the database — nothing touched a running
+`claude`/`gemini`/`codex` subprocess, which would be left orphaned. Confirmed
+by reading the old shutdown code (it genuinely did nothing to child
+processes) and unit-tested against fakes matching the real
+`asyncio.subprocess.Process` interface; not reproduced against a real
+orphaned process live, since reliably delivering a graceful OS shutdown
+signal to a background Windows process from this environment turned out to
+be its own can of worms.
 
 ### CLI
 

@@ -1,4 +1,5 @@
 import asyncio
+import collections
 import functools
 import hmac
 import json
@@ -98,6 +99,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not hmac.compare_digest(supplied, settings.token):
             raise HTTPException(status_code=401, detail="Invalid bearer token")
 
+    # Sliding-window per-client_id limit on the model-invoking endpoints — one
+    # deque of request timestamps per client_id. No lock: everything here runs
+    # on a single asyncio event loop with no `await` between the check and the
+    # append, so it can't interleave with itself the way KeyBridge's
+    # thread-based version needs a lock for.
+    _client_windows: dict[str, collections.deque] = {}
+
+    async def rate_limit(request: Request) -> None:
+        if settings.rate_limit_per_minute <= 0:
+            return
+        client_id = request.headers.get("x-client-id", "anonymous")
+        now = time.monotonic()
+        window = _client_windows.setdefault(client_id, collections.deque())
+        while window and window[0] < now - 60.0:
+            window.popleft()
+        if len(window) >= settings.rate_limit_per_minute:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Rate limit exceeded for client '{client_id}': "
+                       f"max {settings.rate_limit_per_minute} requests/min (set via X-Client-Id header)",
+            )
+        window.append(now)
+
     async def publish(event: dict[str, Any]) -> None:
         await _db(storage.add_event, event)
         for queue in subscribers.get(event["session_id"], set()):
@@ -146,6 +170,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         reaper_task.cancel()
         with suppress(asyncio.CancelledError):
             await reaper_task
+        active_agent_drivers = [d for d in drivers.values() if isinstance(d, SubprocessAgentDriver)]
+        if active_agent_drivers:
+            log.info("interrupting in-flight sessions before shutdown")
+            await asyncio.gather(*(d.shutdown() for d in active_agent_drivers))
         storage.connection.close()
         log.info("remote-gateway stopped")
 
@@ -235,7 +263,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         yield b"data: {\"type\": \"content_block_stop\"}\n\n"
         yield b"data: {\"type\": \"message_stop\"}\n\n"
 
-    @app.post("/v1/messages", dependencies=[Depends(authenticate)], response_model=MessageResponse)
+    @app.post("/v1/messages", dependencies=[Depends(authenticate), Depends(rate_limit)], response_model=MessageResponse)
     async def messages(payload: MessagesRequest, request: Request) -> Any:
         # Validated at the boundary (model/messages/stream/working_directory),
         # then back to a plain dict — driver internals still work with
@@ -256,7 +284,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await _audit(request, driver_name, None, body, result)
         return result
 
-    @app.post("/sessions", dependencies=[Depends(authenticate)], response_model=SessionCreatedResponse)
+    @app.post("/sessions", dependencies=[Depends(authenticate), Depends(rate_limit)], response_model=SessionCreatedResponse)
     async def create_session(payload: CreateSessionRequest) -> dict[str, Any]:
         body = payload.model_dump()
         driver_name = body.get("driver", "")
@@ -298,7 +326,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         events = await _db(storage.events, session_id, limit, after)
         return {"events": events, "next_cursor": events[-1]["event_id"] if events else None, "total": len(events)}
 
-    @app.post("/sessions/{session_id}/messages", dependencies=[Depends(authenticate)], response_model=MessageResponse)
+    @app.post("/sessions/{session_id}/messages", dependencies=[Depends(authenticate), Depends(rate_limit)], response_model=MessageResponse)
     async def send_message(session_id: str, payload: MessagesRequest, request: Request) -> Any:
         session = await _db(storage.get_session, session_id)
         if not session:

@@ -29,6 +29,12 @@ class Settings(BaseSettings):
     session_timeout_minutes: int = Field(30, validation_alias="SESSION_TIMEOUT_MINUTES")
     max_concurrent_sessions: int = Field(10, validation_alias="MAX_CONCURRENT_SESSIONS")
     allow_multiple_sessions_same_driver: bool = Field(False, validation_alias="ALLOW_MULTIPLE_SESSIONS_SAME_DRIVER")
+    # Per-client_id sliding-window limit on model-invoking endpoints (POST
+    # /v1/messages, /sessions, /sessions/{id}/messages). Local agent turns are
+    # much heavier than a typical API call, so the default is far below
+    # KeyBridge's PROXY_TOKEN_RPM=600 — this is about catching a runaway
+    # client, not shaping steady traffic. 0 disables it.
+    rate_limit_per_minute: int = Field(30, validation_alias="RATE_LIMIT_PER_MINUTE")
     log_level: str = Field("INFO", validation_alias="LOG_LEVEL")
     log_format: str = Field("console", validation_alias="LOG_FORMAT")  # "console" or "json"
 

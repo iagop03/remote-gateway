@@ -166,6 +166,23 @@ class SubprocessAgentDriver(LocalLLMDriver):
         except (ProcessLookupError, OSError):
             pass
 
+    async def shutdown(self, grace_seconds: float = 5.0) -> None:
+        """Called when the gateway process itself is shutting down. Without this,
+        an in-flight turn's subprocess is orphaned: interrupt() alone only sends
+        the signal, it doesn't wait for the process to actually exit before our
+        own process does. Interrupts every still-running session gracefully
+        first, then kills whatever hasn't exited within the grace period, so
+        nothing is left behind."""
+        processes = list(self._active.items())
+        for session_id, _process in processes:
+            await self.interrupt(session_id)
+        for session_id, process in processes:
+            try:
+                await asyncio.wait_for(process.wait(), timeout=grace_seconds)
+            except asyncio.TimeoutError:
+                process.kill()
+            self._active.pop(session_id, None)
+
     def _resolve_cwd(self, working_directory: str | None) -> str | None:
         if not working_directory:
             return None

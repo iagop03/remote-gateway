@@ -92,6 +92,47 @@ def test_max_concurrent_sessions_returns_429(tmp_path):
         assert response.status_code == 429
 
 
+def test_rate_limit_returns_429_after_threshold_per_client_id(tmp_path):
+    response = type("Response", (), {"is_success": True, "raise_for_status": lambda self: None,
+                                     "json": lambda self: {"message": {"content": "hi"}}})()
+    fake_client = type("Client", (), {"__aenter__": AsyncMock(return_value=type("Client", (), {
+        "post": AsyncMock(return_value=response)})()), "__aexit__": AsyncMock(return_value=None)})
+
+    app = create_app(Settings(
+        database_path=str(tmp_path / "test.db"), token="secret", ollama_enabled=True, rate_limit_per_minute=2,
+    ))
+    with patch("remote_gateway.drivers.http.httpx.AsyncClient", return_value=fake_client()):
+        with TestClient(app) as api:
+            headers = {"Authorization": "Bearer secret", "X-Client-Id": "client-a"}
+            body = {"model": "ollama:mistral", "messages": [{"role": "user", "content": "hi"}]}
+            assert api.post("/v1/messages", headers=headers, json=body).status_code == 200
+            assert api.post("/v1/messages", headers=headers, json=body).status_code == 200
+            third = api.post("/v1/messages", headers=headers, json=body)
+            assert third.status_code == 429
+            assert "client-a" in third.json()["detail"]
+
+            # A different client_id has its own bucket — not affected by client-a's usage.
+            other_headers = {**headers, "X-Client-Id": "client-b"}
+            assert api.post("/v1/messages", headers=other_headers, json=body).status_code == 200
+
+
+def test_rate_limit_disabled_when_zero(tmp_path):
+    response = type("Response", (), {"is_success": True, "raise_for_status": lambda self: None,
+                                     "json": lambda self: {"message": {"content": "hi"}}})()
+    fake_client = type("Client", (), {"__aenter__": AsyncMock(return_value=type("Client", (), {
+        "post": AsyncMock(return_value=response)})()), "__aexit__": AsyncMock(return_value=None)})
+
+    app = create_app(Settings(
+        database_path=str(tmp_path / "test.db"), token="secret", ollama_enabled=True, rate_limit_per_minute=0,
+    ))
+    with patch("remote_gateway.drivers.http.httpx.AsyncClient", return_value=fake_client()):
+        with TestClient(app) as api:
+            headers = {"Authorization": "Bearer secret"}
+            body = {"model": "ollama:mistral", "messages": [{"role": "user", "content": "hi"}]}
+            for _ in range(5):
+                assert api.post("/v1/messages", headers=headers, json=body).status_code == 200
+
+
 def test_expired_session_rejects_new_messages(tmp_path):
     app = create_app(Settings(database_path=str(tmp_path / "test.db"), token="secret"))
     with TestClient(app) as api:
