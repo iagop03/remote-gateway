@@ -35,6 +35,13 @@ class Settings(BaseSettings):
     # KeyBridge's PROXY_TOKEN_RPM=600 — this is about catching a runaway
     # client, not shaping steady traffic. 0 disables it.
     rate_limit_per_minute: int = Field(30, validation_alias="RATE_LIMIT_PER_MINUTE")
+    # Per-driver max concurrent calls to the same working_directory.
+    # 1 = serialize (default for all subprocess drivers — they share on-disk
+    #     state in the working directory and must not run concurrently there).
+    # 0 = unlimited (useful when working_directory isolation is handled externally).
+    claude_code_concurrency_per_cwd: int = Field(1, validation_alias="CLAUDE_CODE_CONCURRENCY_PER_CWD")
+    gemini_concurrency_per_cwd: int = Field(1, validation_alias="GEMINI_CONCURRENCY_PER_CWD")
+    codex_concurrency_per_cwd: int = Field(1, validation_alias="CODEX_CONCURRENCY_PER_CWD")
     log_level: str = Field("INFO", validation_alias="LOG_LEVEL")
     log_format: str = Field("console", validation_alias="LOG_FORMAT")  # "console" or "json"
 

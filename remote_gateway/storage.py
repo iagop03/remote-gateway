@@ -45,10 +45,14 @@ class Storage:
             CREATE INDEX IF NOT EXISTS idx_audit_log_client_id ON audit_log(client_id);
             """
         )
-        try:
-            self.connection.execute("ALTER TABLE sessions ADD COLUMN driver_session_id TEXT")
-        except sqlite3.OperationalError:
-            pass
+        for migration in (
+            "ALTER TABLE sessions ADD COLUMN driver_session_id TEXT",
+            "ALTER TABLE audit_log ADD COLUMN working_directory TEXT",
+        ):
+            try:
+                self.connection.execute(migration)
+            except sqlite3.OperationalError:
+                pass
         self.connection.commit()
 
     def create_session(self, session: dict[str, Any]) -> None:
@@ -92,10 +96,11 @@ class Storage:
     def add_audit_entry(self, entry: dict[str, Any]) -> None:
         self.connection.execute(
             "INSERT INTO audit_log (timestamp, client_id, driver, model, session_id, "
-            "input_tokens, output_tokens, origin_ip, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "input_tokens, output_tokens, origin_ip, status, working_directory) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (entry["timestamp"], entry["client_id"], entry["driver"], entry["model"], entry.get("session_id"),
              entry.get("input_tokens", 0), entry.get("output_tokens", 0), entry.get("origin_ip"),
-             entry.get("status", "ok")),
+             entry.get("status", "ok"), entry.get("working_directory")),
         )
         self.connection.commit()
 
@@ -114,6 +119,37 @@ class Storage:
         params.append(min(max(limit, 1), 1000))
         rows = self.connection.execute(query, params).fetchall()
         return [dict(row) for row in rows]
+
+    def usage_aggregate(
+        self,
+        client_id: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        working_directory: str | None = None,
+    ) -> dict[str, Any]:
+        query = "SELECT driver, SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens, COUNT(*) AS calls FROM audit_log WHERE 1=1"
+        params: list[Any] = []
+        if client_id:
+            query += " AND client_id = ?"
+            params.append(client_id)
+        if since:
+            query += " AND timestamp >= ?"
+            params.append(since)
+        if until:
+            query += " AND timestamp <= ?"
+            params.append(until)
+        if working_directory:
+            query += " AND working_directory = ?"
+            params.append(working_directory)
+        query += " GROUP BY driver"
+        rows = self.connection.execute(query, params).fetchall()
+        by_driver = [dict(row) for row in rows]
+        return {
+            "total_input_tokens":  sum(r["input_tokens"] for r in by_driver),
+            "total_output_tokens": sum(r["output_tokens"] for r in by_driver),
+            "total_calls":         sum(r["calls"] for r in by_driver),
+            "by_driver":           by_driver,
+        }
 
     def count_active_sessions(self, driver: str | None = None) -> int:
         placeholders = ",".join("?" * len(_TERMINAL_STATUSES))

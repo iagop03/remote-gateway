@@ -152,6 +152,18 @@ class SubprocessAgentDriver(LocalLLMDriver):
             return self._interrupted_message(body, "interrupted"), {"driver_session_id": resume_id, "status": "interrupted"}
 
         message, status = self._build_result_message(body, result_payload, accumulated_text)
+        # Estimate tokens from text length when the driver doesn't report them.
+        # Gemini CLI may not populate stats; codex exec may omit usage on some versions.
+        # ~4 chars per token is a reasonable approximation for any Latin-script text.
+        usage = message.setdefault("usage", {})
+        if not usage.get("input_tokens") and not usage.get("output_tokens"):
+            try:
+                prompt = self._extract_prompt(body.get("messages", []))
+            except RuntimeError:
+                prompt = ""
+            usage["input_tokens"] = max(1, len(prompt) // 4)
+            usage["output_tokens"] = max(1, len(accumulated_text) // 4)
+            usage["usage_estimated"] = True
         return message, {"driver_session_id": resume_id, "status": status}
 
     async def interrupt(self, session_id: str | None = None) -> None:

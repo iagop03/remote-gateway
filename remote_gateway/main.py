@@ -5,7 +5,7 @@ import hmac
 import json
 import time
 import uuid
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager, nullcontext, suppress
 from datetime import datetime, timedelta, timezone
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from typing import Any, AsyncIterator
@@ -22,7 +22,7 @@ from .logging import configure_logging, get_logger
 from .models import (
     CreateSessionRequest, DriversResponse, EventHistoryResponse, HealthResponse,
     LogsResponse, MessageResponse, MessagesRequest, MetricsResponse,
-    ModelsResponse, SessionCreatedResponse, SessionDetailResponse,
+    ModelsResponse, SessionCreatedResponse, SessionDetailResponse, UsageResponse,
 )
 from .storage import Storage, utc_now
 
@@ -85,6 +85,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     subscribers: dict[str, set[asyncio.Queue[dict[str, Any]]]] = {}
     start_time = time.monotonic()
 
+    # Per-(driver, working_directory) concurrency limits for subprocess drivers.
+    # Serializes calls that share the same on-disk working directory so they
+    # don't corrupt each other's CLI state (CLAUDE.md, .claude/memory/, etc.).
+    # 0 means unlimited; any positive value is the semaphore limit.
+    _cwd_limits: dict[str, int] = {
+        "claude-code": settings.claude_code_concurrency_per_cwd,
+        "gemini":      settings.gemini_concurrency_per_cwd,
+        "codex":       settings.codex_concurrency_per_cwd,
+    }
+    _cwd_semaphores: dict[tuple[str, str], asyncio.Semaphore] = {}
+
     async def _db(func, *args: Any, **kwargs: Any) -> Any:
         # Storage is plain sqlite3 (synchronous); offload it so it never blocks the
         # event loop, which matters once a session is publishing many small events
@@ -133,6 +144,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return forwarded.split(",")[0].strip()
         return request.client.host if request.client else ""
 
+    def _cwd_semaphore(driver_name: str, working_directory: str | None) -> asyncio.Semaphore | None:
+        limit = _cwd_limits.get(driver_name, 0)
+        if not limit or not working_directory:
+            return None
+        key = (driver_name, working_directory)
+        if key not in _cwd_semaphores:
+            _cwd_semaphores[key] = asyncio.Semaphore(limit)
+        return _cwd_semaphores[key]
+
     async def _audit(
         request: Request, driver_name: str, session_id: str | None, body: dict[str, Any], message: dict[str, Any]
     ) -> None:
@@ -147,6 +167,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "input_tokens": usage.get("input_tokens", 0), "output_tokens": usage.get("output_tokens", 0),
             "origin_ip": _origin_ip(request),
             "status": "error" if message.get("stop_reason") == "error" else "ok",
+            "working_directory": body.get("working_directory"),
         })
 
     async def _session_reaper() -> None:
@@ -219,6 +240,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         entries = await _db(storage.audit_entries, limit, client_id, since)
         return {"entries": entries, "total": len(entries)}
 
+    @app.get("/usage", dependencies=[Depends(authenticate)], response_model=UsageResponse)
+    async def usage(
+        client_id: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        working_directory: str | None = None,
+    ) -> dict[str, Any]:
+        return await _db(storage.usage_aggregate, client_id, since, until, working_directory)
+
     async def _stream_message_events(
         driver: LocalLLMDriver, driver_name: str, body: dict[str, Any], request: Request
     ) -> AsyncIterator[bytes]:
@@ -230,6 +260,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
         session = {"session_id": f"sess_{uuid.uuid4().hex}", "working_directory": body.get("working_directory")}
         final_message: dict[str, Any] = {}
+        sem = _cwd_semaphore(driver_name, body.get("working_directory"))
 
         async def local_publish(event: dict[str, Any]) -> None:
             await queue.put(event)
@@ -237,7 +268,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         async def runner() -> None:
             nonlocal final_message
             try:
-                final_message, _ = await driver.run_session(session, body, local_publish)
+                async with (sem if sem else nullcontext()):
+                    final_message, _ = await driver.run_session(session, body, local_publish)
             except RuntimeError as exc:
                 await queue.put(make_event(session["session_id"], "error", {"message": str(exc)}))
             finally:
@@ -276,8 +308,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail="Model must use a known provider prefix")
         if body.get("stream"):
             return StreamingResponse(_stream_message_events(driver, driver_name, body, request), media_type="text/event-stream")
+        sem = _cwd_semaphore(driver_name, body.get("working_directory"))
         try:
-            result = await driver.messages(body)
+            async with (sem if sem else nullcontext()):
+                result = await driver.messages(body)
         except RuntimeError as exc:
             log.warning("turn failed", driver=driver_name, error=str(exc))
             raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -344,9 +378,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # it, so a plain `body.get("model", session["model"])` would never fall
         # back — fix the value itself before it reaches the driver.
         body["model"] = body.get("model") or session["model"]
+        # Inherit working_directory from session when not overridden in the message body.
+        if not body.get("working_directory") and session.get("working_directory"):
+            body["working_directory"] = session["working_directory"]
         await _db(storage.update_session, session_id, status="processing", last_activity=utc_now())
+        sem = _cwd_semaphore(session["driver"], body.get("working_directory"))
         try:
-            result, updates = await driver.run_session(session, body, publish)
+            async with (sem if sem else nullcontext()):
+                result, updates = await driver.run_session(session, body, publish)
         except RuntimeError as exc:
             await _db(storage.update_session, session_id, status="error", last_activity=utc_now())
             log.warning("turn failed", session_id=session_id, driver=session["driver"], error=str(exc))

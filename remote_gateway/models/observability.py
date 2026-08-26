@@ -53,8 +53,23 @@ class AuditEntryOut(BaseModel):
     output_tokens: int
     origin_ip: str | None = None
     status: str
+    working_directory: str | None = None
 
 
 class LogsResponse(BaseModel):
     entries: list[AuditEntryOut]
     total: int
+
+
+class UsageByDriver(BaseModel):
+    driver: str
+    input_tokens: int
+    output_tokens: int
+    calls: int
+
+
+class UsageResponse(BaseModel):
+    total_input_tokens: int
+    total_output_tokens: int
+    total_calls: int
+    by_driver: list[UsageByDriver]

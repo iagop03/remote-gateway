@@ -2,7 +2,7 @@ from .events import EventHistoryResponse, EventOut
 from .messages import ContentBlock, MessageResponse, MessagesRequest, Usage
 from .observability import (
     AuditEntryOut, DriversResponse, DriverStatus, HealthResponse,
-    LogsResponse, MetricsResponse, ModelInfo, ModelsResponse,
+    LogsResponse, MetricsResponse, ModelInfo, ModelsResponse, UsageByDriver, UsageResponse,
 )
 from .sessions import CreateSessionRequest, SessionCreatedResponse, SessionDetailResponse
 
@@ -11,5 +11,5 @@ __all__ = [
     "CreateSessionRequest", "SessionCreatedResponse", "SessionDetailResponse",
     "EventOut", "EventHistoryResponse",
     "DriverStatus", "HealthResponse", "DriversResponse", "ModelInfo", "ModelsResponse",
-    "MetricsResponse", "AuditEntryOut", "LogsResponse",
+    "MetricsResponse", "AuditEntryOut", "LogsResponse", "UsageByDriver", "UsageResponse",
 ]
