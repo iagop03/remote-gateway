@@ -1,6 +1,8 @@
 # Remote Gateway
 
-Remote Gateway exposes local LLM providers through a small, authenticated FastAPI service. The MVP supports driver discovery, model discovery, Anthropic-style `/v1/messages` responses, SSE streaming, SQLite-backed sessions and event replay.
+[![tests](https://github.com/iagop03/remote-gateway/actions/workflows/tests.yml/badge.svg)](https://github.com/iagop03/remote-gateway/actions/workflows/tests.yml)
+
+Remote Gateway exposes local LLM providers through a small, authenticated FastAPI service. It supports driver discovery, model discovery, Anthropic-style `/v1/messages` responses, real SSE streaming, SQLite-backed sessions with event replay, an audit log, and operational metrics.
 
 ## Run
 
